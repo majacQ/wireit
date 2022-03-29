@@ -20,63 +20,78 @@ import type {
 } from './script.js';
 
 /**
+ *  ┌───────────────┐
+ *  | uninitialized | ──────────────────────────────────┐
+ *  └───────────────┘                                   |
+ *         |                                            |
+ *         |  ┌─────────────────────────────────┐       |
+ *         |  |  ┌──────────────┐               |       |
+ *         ▼  ▼  ▼              |               |       |
+ *        ┌───────┐      ┌───────────┐      ┌───────┐   |
+ *        | stale | ───► | executing | ───► | fresh |   |
+ *        └───────┘      └───────────┘      └───────┘   |
+ *          |   ▲            │    │             |       |
+ *          |   |            ▼    └──────────┐  |       |
+ *          |   |   ┌─────────────────────┐  |  |       |
+ *          |   └── | executing-and-stale |  |  |       |
+ *          |       └─────────────────────┘  |  |       |
+ *          |                │               ▼  ▼       |
+ *          |                └──────────► ┌─────────┐   |
+ *          └───────────────────────────► | aborted | ◀─┘
+ *                                        └─────────┘
+ */
+type WatcherState =
+  | 'uninitialized'
+  | 'stale'
+  | 'executing'
+  | 'executing-and-stale'
+  | 'fresh'
+  | 'aborted';
+
+/**
  * Watches a script for changes in its input files, and in the input files of
  * its transitive dependencies, and executes all affected scripts when they
  * change.
  *
  * Also watches all related package.json files and reloads script configuration
  * when they change.
- *
- * State diagram:
- *
- *                ┌──────────────────────────────────┐
- *                |  ┌──────────────┐                |
- *                ▼  ▼              |                |
- * ┌──────┐    ┌───────┐      ┌───────────┐      ┌───────┐
- * | init |───►| stale | ───► | executing | ───► | fresh |
- * └──────┘    └───────┘      └───────────┘      └───────┘
- *                 │                │                │
- *                 |                ▼                |
- *                 |           ┌─────────┐           |
- *                 └─────────► | aborted | ◄─────────┘
- *                             └─────────┘
  */
 export class Watcher {
   private readonly _script: ScriptReference;
   private readonly _logger: Logger;
   private readonly _watchers: Array<chokidar.FSWatcher> = [];
-  private readonly _abort: AbortController;
 
-  /** Whether watch() has ever been called on this instance. */
-  private _initialized = false;
-
-  /** Whether an executor is currently running. */
-  private _executing = false;
-
-  /** Whether a file has changed since the last time we executed. */
-  private _stale = true;
-
-  /** Whether the watcher has been aborted. */
-  private get _aborted() {
-    return this._abort.signal.aborted;
-  }
+  /** Underlying current state (use {@link _state} to read/write). */
+  private __state: WatcherState = 'uninitialized';
 
   /** Notification that some state has changed. */
-  private _update = new Deferred<void>();
+  private _stateChange = new Deferred<void>();
+
+  /** Get the current state. */
+  private get _state(): WatcherState {
+    return this.__state;
+  }
+
+  /** Set the current state and notify the main loop. */
+  private set _state(state: WatcherState) {
+    this.__state = state;
+    this._stateChange.resolve();
+  }
 
   constructor(script: ScriptReference, logger: Logger, abort: AbortController) {
     this._script = script;
     this._logger = logger;
-    this._abort = abort;
 
-    if (!this._aborted) {
+    if (abort.signal.aborted) {
+      this._state = 'aborted';
+    } else {
       abort.signal.addEventListener(
         'abort',
         () => {
           // TODO(aomarks) Aborting should also cause the analyzer and executors to
           // stop if they are running. Currently we only stop after the current
           // build entirely finishes.
-          this._update.resolve();
+          this._state = 'aborted';
         },
         {once: true}
       );
@@ -92,19 +107,17 @@ export class Watcher {
    * `watch()` is called more than once per instance of `Watcher`.
    */
   async watch(): Promise<void> {
-    if (this._initialized) {
+    if (this._state === 'aborted') {
+      return;
+    }
+    if (this._state !== 'uninitialized') {
+      // TODO(aomarks) This doesn't throw if we've aborted and watch() was
+      // called more than once. Technically it probably should.
       throw new Error('watch() can only be called once per Watcher instance');
     }
-    this._initialized = true;
-
+    this._state = 'stale';
     try {
-      while (!this._aborted) {
-        if (this._stale && !this._executing) {
-          await this._analyzeAndExecute();
-        }
-        await this._update.promise;
-        this._update = new Deferred();
-      }
+      await this._watchLoop();
     } finally {
       // It's important to close all chokidar watchers, because they will
       // prevent the Node program from ever exiting as long as they are active.
@@ -112,14 +125,24 @@ export class Watcher {
     }
   }
 
+  private async _watchLoop(): Promise<void> {
+    // Note this function must be factored out of watch() because the
+    // `this._state = 'stale'` statement causes `this._state` to be overly
+    // narrowed, despite the presense of `await`.
+    while (this._state !== 'aborted') {
+      if (this._state === 'stale') {
+        await this._analyzeAndExecute();
+      }
+      await this._stateChange.promise;
+      this._stateChange = new Deferred();
+    }
+  }
+
   /**
    * Perform an analysis and execution.
    */
   private async _analyzeAndExecute(): Promise<void> {
-    // Reset _stale before execution, not after, because a file could change
-    // during execution, and we must not clobber that.
-    this._stale = false;
-    this._executing = true;
+    this._state = 'executing';
 
     // TODO(aomarks) We only need to reset watchers and re-analyze if a
     // package.json file changed.
@@ -139,8 +162,12 @@ export class Watcher {
     } catch (error) {
       this._triageErrors(error);
     }
-    this._executing = false;
-    this._update.resolve();
+
+    if (this._state === 'executing') {
+      this._state = 'fresh';
+    } else if (this._state === 'executing-and-stale') {
+      this._state = 'stale';
+    }
   }
 
   /**
@@ -184,8 +211,11 @@ export class Watcher {
    */
   private readonly _fileChanged = (): void => {
     // TODO(aomarks) Cache package JSONS, globs, and hashes.
-    this._stale = true;
-    this._update.resolve();
+    if (this._state === 'fresh') {
+      this._state = 'stale';
+    } else if (this._state === 'executing') {
+      this._state = 'executing-and-stale';
+    }
   };
 
   /**
