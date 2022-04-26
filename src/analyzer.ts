@@ -6,7 +6,7 @@
 
 import * as pathlib from 'path';
 import {WireitError} from './error.js';
-import {astKey, CachingPackageJsonReader} from './util/package-json-reader.js';
+import {CachingPackageJsonReader} from './util/package-json-reader.js';
 import {scriptReferenceToString, stringToScriptReference} from './script.js';
 
 import type {CachingPackageJsonReaderError} from './util/package-json-reader.js';
@@ -118,9 +118,9 @@ export class Analyzer {
    * upgraded; dependencies are upgraded asynchronously.
    */
   async #upgradePlaceholder(placeholder: PlaceholderConfig): Promise<void> {
-    let packageJson;
+    let packageJsonAst;
     try {
-      packageJson = await this.#packageJsonReader.read(
+      packageJsonAst = await this.#packageJsonReader.read(
         placeholder.packageDir,
         placeholder
       );
@@ -141,7 +141,6 @@ export class Analyzer {
       }
     }
 
-    const packageJsonAst = packageJson[astKey];
     const scriptsSection = findNamedNodeAtLocation(
       packageJsonAst,
       ['scripts'],
