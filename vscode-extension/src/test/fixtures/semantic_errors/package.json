@@ -13,6 +13,12 @@
       "command": "foo"
     },
     "invalid_dependency": {
+      "dependencies": [
+        "not_wireit_command",
+        "unrelated",
+        "unknown",
+        "./another_dir:also_unknown"
+      ],
       "command": "bar"
     },
     "neither_dependencies_nor_command": {

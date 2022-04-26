@@ -24,6 +24,8 @@ import {
   CodeAction,
   CodeActionKind,
   WorkspaceEdit,
+  Definition,
+  Position,
 } from 'vscode-languageserver/node';
 import * as jsonParser from 'jsonc-parser';
 
@@ -48,6 +50,7 @@ connection.onInitialize(() => {
           CodeActionKind.RefactorExtract,
         ],
       },
+      definitionProvider: true,
     },
   };
   return result;
@@ -90,7 +93,7 @@ class JsonProperty<T = unknown> {
     this.propertyAst = propertyAst;
   }
 
-  static fromAst(ast: jsonParser.Node): JsonProperty | undefined {
+  static fromAst(ast: jsonParser.Node) {
     if (ast.type !== 'property') {
       return undefined;
     }
@@ -99,13 +102,66 @@ class JsonProperty<T = unknown> {
     if (keyAst?.type !== 'string' || valueAst == null) {
       return undefined;
     }
-    return new JsonProperty(
+    return new this(
       keyAst.value as string,
       valueAst.value as unknown,
       keyAst,
       valueAst,
       ast
     );
+  }
+}
+
+class WireitConfig extends JsonProperty {
+  readonly dependencies: ReadonlyArray<{value: string; node: jsonParser.Node}>;
+  readonly dependenciesAst: JsonProperty | undefined;
+  protected constructor(
+    key: string,
+    value: unknown,
+    keyAst: jsonParser.Node,
+    valueAst: jsonParser.Node,
+    propertyAst: jsonParser.Node,
+    dependencies: ReadonlyArray<{value: string; node: jsonParser.Node}>,
+    dependenciesAst: JsonProperty | undefined
+  ) {
+    super(key, value, keyAst, valueAst, propertyAst);
+    this.dependencies = dependencies;
+    this.dependenciesAst = dependenciesAst;
+  }
+
+  static fromAst(ast: jsonParser.Node): WireitConfig | undefined {
+    const baseAst = JsonProperty.fromAst(ast);
+    if (baseAst == null) {
+      return undefined;
+    }
+    let dependencies = getPropertyByKeyName(baseAst.valueAst, 'dependencies');
+    if (dependencies?.valueAst.type !== 'array') {
+      dependencies = undefined;
+    }
+    const deps =
+      dependencies?.valueAst.children
+        ?.filter((dep) => {
+          return typeof dep.value === 'string';
+        })
+        .map((dep) => {
+          return {value: dep.value as string, node: dep};
+        }) ?? [];
+
+    return new this(
+      baseAst.key,
+      baseAst.value,
+      baseAst.keyAst,
+      baseAst.valueAst,
+      baseAst.propertyAst,
+      deps,
+      dependencies
+    );
+  }
+}
+
+class ScriptDeclaration extends JsonProperty {
+  get isWireitScript() {
+    return typeof this.value === 'string' && this.value.trim() === 'wireit';
   }
 }
 
@@ -117,8 +173,8 @@ class Analysis {
   // The "script": {...} object in the package.json file.
   #scriptProperty: JsonProperty | undefined;
 
-  #wireitConfigsByKey: Map<string, JsonProperty> = new Map();
-  #scriptsByKey: Map<string, JsonProperty> = new Map();
+  #wireitConfigsByKey: Map<string, WireitConfig> = new Map();
+  #scriptsByKey: Map<string, ScriptDeclaration> = new Map();
 
   constructor(textDocument: TextDocument) {
     this.#textDocument = textDocument;
@@ -134,14 +190,14 @@ class Analysis {
     })();
     this.#wireitProperty = wireit;
     this.#wireitProperty?.valueAst?.children?.forEach((child) => {
-      const property = JsonProperty.fromAst(child);
+      const property = WireitConfig.fromAst(child);
       if (property) {
         this.#wireitConfigsByKey.set(property.key, property);
       }
     });
     this.#scriptProperty = scripts;
     this.#scriptProperty?.valueAst?.children?.forEach((child) => {
-      const property = JsonProperty.fromAst(child);
+      const property = ScriptDeclaration.fromAst(child) as ScriptDeclaration;
       if (property) {
         this.#scriptsByKey.set(property.key, property);
       }
@@ -152,6 +208,7 @@ class Analysis {
     return [
       ...this.#checkThatWireitScriptsDeclaredInScriptsSection(),
       ...this.#checkThatWireitScriptHasAtLeastOneOfCommandOrDependencies(),
+      ...this.#checkThatSameFileDependenciesResolve(),
     ];
   }
 
@@ -222,6 +279,72 @@ class Analysis {
     return [];
   }
 
+  getDefinition(position: Position): Definition | undefined {
+    const range = {
+      start: position,
+      end: position,
+    };
+    const propAndKind = this.#getPropertyByRange(range);
+    if (propAndKind == null) {
+      return undefined;
+    }
+    const {kind, property} = propAndKind;
+    if (kind === 'script') {
+      if (property.isWireitScript) {
+        return undefined;
+      }
+      const wireitCommand = this.#wireitConfigsByKey.get(property.key);
+      if (wireitCommand == null) {
+        return undefined;
+      }
+
+      return {
+        uri: this.#textDocument.uri,
+        range: {
+          start: this.#textDocument.positionAt(
+            wireitCommand.propertyAst.offset
+          ),
+          end: this.#textDocument.positionAt(
+            wireitCommand.propertyAst.offset + wireitCommand.propertyAst.length
+          ),
+        },
+      };
+    } else {
+      if (
+        property.dependenciesAst == null ||
+        !this.#contains(range, property.dependenciesAst.valueAst)
+      ) {
+        return undefined;
+      }
+      const dependency = property.dependencies.find(({node}) => {
+        return this.#contains(range, node);
+      });
+      if (dependency == null) {
+        return undefined;
+      }
+      // What if dependency.value points to another file?
+      const scriptDep = this.#scriptsByKey.get(dependency.value);
+      let target;
+      if (scriptDep == null || scriptDep.isWireitScript) {
+        target = this.#wireitConfigsByKey.get(dependency.value);
+      } else {
+        target = scriptDep;
+      }
+      if (target == null) {
+        return undefined;
+      }
+      return {
+        uri: this.#textDocument.uri,
+        range: {
+          start: this.#textDocument.positionAt(target.propertyAst.offset),
+          end: this.#textDocument.positionAt(
+            target.propertyAst.offset + target.propertyAst.length
+          ),
+        },
+      };
+    }
+  }
+
   #modifyMultiple(
     modifications: Array<{path: jsonParser.JSONPath; value: unknown}>
   ): WorkspaceEdit {
@@ -258,9 +381,11 @@ class Analysis {
 
   #getPropertyByRange(
     range: Range
-  ): {kind: 'wireit' | 'script'; property: JsonProperty} | undefined {
+  ):
+    | {kind: 'wireit'; property: WireitConfig}
+    | {kind: 'script'; property: ScriptDeclaration}
+    | undefined {
     if (this.#contains(range, this.#wireitProperty?.propertyAst)) {
-      log(`inside the wireit section`);
       // it's inside the wireit range
       for (const prop of this.#wireitConfigsByKey.values()) {
         if (this.#contains(range, prop.propertyAst)) {
@@ -268,7 +393,6 @@ class Analysis {
         }
       }
     } else if (this.#contains(range, this.#scriptProperty?.propertyAst)) {
-      log(`inside the script section`);
       // it's inside the script range
       for (const prop of this.#scriptsByKey.values()) {
         if (this.#contains(range, prop.propertyAst)) {
@@ -304,10 +428,7 @@ class Analysis {
           },
         };
       } else {
-        if (
-          typeof scriptProp.value === 'string' &&
-          scriptProp.value.trim() !== 'wireit'
-        ) {
+        if (!scriptProp.isWireitScript) {
           yield {
             severity: DiagnosticSeverity.Error,
             message: `This script is declared in the "wireit" section, but that won't have any effect unless this command is just "wireit"`,
@@ -346,6 +467,31 @@ class Analysis {
       }
     }
   }
+
+  *#checkThatSameFileDependenciesResolve(): IterableIterator<Diagnostic> {
+    for (const prop of this.#wireitConfigsByKey.values()) {
+      for (const dependency of prop.dependencies) {
+        if (dependency.value.startsWith('.')) {
+          continue; // we don't yet support checking cross-file deps
+        }
+        const scriptDep = this.#scriptsByKey.get(dependency.value);
+        if (scriptDep != null) {
+          continue;
+        }
+        yield {
+          severity: DiagnosticSeverity.Error,
+          message: `Can't find npm script "${dependency.value}"`,
+          source: 'wireit',
+          range: {
+            start: this.#textDocument.positionAt(dependency.node.offset),
+            end: this.#textDocument.positionAt(
+              dependency.node.offset + dependency.node.length
+            ),
+          },
+        };
+      }
+    }
+  }
 }
 
 documents.onDidChangeContent((change) => {
@@ -369,6 +515,15 @@ connection.onCodeAction((params) => {
   }
   const analysis = new Analysis(document);
   return analysis.getCodeActions(params.range);
+});
+
+connection.onDefinition((params) => {
+  const document = documents.get(params.textDocument.uri);
+  if (document == null) {
+    return undefined;
+  }
+  const analysis = new Analysis(document);
+  return analysis.getDefinition(params.position);
 });
 
 function getPropertyByKeyName(objectNode: jsonParser.Node, key: string) {
