@@ -4,8 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type {ScriptStateString, ScriptReference} from '../script.js';
-import type {RelativeEntry} from '../util/glob.js';
+import type {ScriptReference} from '../config.js';
+import type {Fingerprint} from '../fingerprint.js';
+import type {AbsoluteEntry} from '../util/glob.js';
 
 /**
  * Saves and restores output files to some cache store (e.g. local disk or
@@ -13,36 +14,36 @@ import type {RelativeEntry} from '../util/glob.js';
  */
 export interface Cache {
   /**
-   * Check for a cache hit for the given script and cache key. Don't write it to
+   * Check for a cache hit for the given script and fingerprint. Don't write it to
    * disk yet, instead return a {@link CacheHit} which can be used to control
    * when writing occurs.
    *
    * @param script The script whose output will be read from the cache.
-   * @param cacheKey The string-encoded cache key for the script.
+   * @param fingerprint The string-encoded fingerprint for the script.
    * @return Promise of a {@link CacheHit} if there was an entry in the cache,
    * or undefined if there was not.
    */
   get(
     script: ScriptReference,
-    cacheKey: ScriptStateString
+    fingerprint: Fingerprint
   ): Promise<CacheHit | undefined>;
 
   /**
    * Write the given file paths to the cache if possible, keyed by the given
-   * script and cache key.
+   * script and fingerprint.
    *
    * It is valid for an implementation to decide not to write to the cache and
    * return false, for example if the contents are too large.
    *
    * @param script The script whose output will be saved to the cache.
-   * @param cacheKey The string-encoded cache key for the script.
-   * @param relativeFiles The package-relative output files to cache.
+   * @param fingerprint The string-encoded fingerprint for the script.
+   * @param absoluteFiles The absolute output files to cache.
    * @returns Whether the cache was written.
    */
   set(
     script: ScriptReference,
-    cacheKey: ScriptStateString,
-    relativeFiles: RelativeEntry[]
+    fingerprint: Fingerprint,
+    absoluteFiles: AbsoluteEntry[]
   ): Promise<boolean>;
 }
 

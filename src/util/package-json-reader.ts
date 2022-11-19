@@ -4,72 +4,69 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {Result} from '../error.js';
+import {AsyncCache} from './async-cache.js';
+import {PackageJson} from './package-json.js';
 import * as pathlib from 'path';
 import * as fs from 'fs/promises';
+import {parseTree} from './ast.js';
 
-/**
- * A raw package.json JSON object, including the special "wireit" section.
- */
-export interface PackageJson {
-  name?: string;
-  version?: string;
-  scripts?: {[scriptName: string]: string};
-  wireit?: {
-    [scriptName: string]: {
-      command?: string;
-      dependencies?: string[];
-      files?: string[];
-      output?: string[];
-      clean?: boolean | 'if-file-deleted';
-      packageLocks?: string[];
-    };
-  };
+export const astKey = Symbol('ast');
+
+export interface FileSystem {
+  readFile(path: string, options: 'utf8'): Promise<string>;
 }
 
 /**
  * Reads package.json files and caches them.
  */
 export class CachingPackageJsonReader {
-  readonly #cache = new Map<string, PackageJson>();
+  private readonly _cache = new AsyncCache<string, Result<PackageJson>>();
+  private readonly _fs;
+  constructor(filesystem: FileSystem = fs) {
+    this._fs = filesystem;
+  }
 
-  async read(packageDir: string): Promise<PackageJson> {
-    let packageJson = this.#cache.get(packageDir);
-    if (packageJson === undefined) {
-      const packageJsonPath = pathlib.resolve(packageDir, 'package.json');
-      let packageJsonStr: string;
+  async read(packageDir: string): Promise<Result<PackageJson>> {
+    return this._cache.getOrCompute(packageDir, async () => {
+      const path = pathlib.resolve(packageDir, 'package.json');
+      let contents;
       try {
-        packageJsonStr = await fs.readFile(packageJsonPath, 'utf8');
+        contents = await this._fs.readFile(path, 'utf8');
       } catch (error) {
         if ((error as {code?: string}).code === 'ENOENT') {
-          throw new CachingPackageJsonReaderError('missing-package-json');
+          return {
+            ok: false,
+            error: {
+              type: 'failure',
+              reason: 'missing-package-json',
+              script: {packageDir},
+            },
+          };
         }
         throw error;
       }
-      try {
-        packageJson = JSON.parse(packageJsonStr) as PackageJson;
-      } catch (error) {
-        throw new CachingPackageJsonReaderError('invalid-package-json');
+      const astResult = parseTree(path, contents);
+      if (!astResult.ok) {
+        return astResult;
       }
-      this.#cache.set(packageDir, packageJson);
+      const packageJsonFile = new PackageJson(
+        {contents, path},
+        astResult.value
+      );
+      return {ok: true, value: packageJsonFile};
+    });
+  }
+
+  async *getFailures() {
+    const values = await Promise.all([...this._cache.values]);
+    for (const result of values) {
+      if (!result.ok) {
+        yield result.error;
+        continue;
+      }
+      const packageJson = result.value;
+      yield* packageJson.failures;
     }
-    return packageJson;
   }
 }
-
-/**
- * An exception thrown by {@link CachingPackageJsonReader}.
- *
- * Note we don't use {@link WireitError} here because we don't have the full
- * context of the script we're trying to evaluate.
- */
-class CachingPackageJsonReaderError extends Error {
-  reason: 'missing-package-json' | 'invalid-package-json';
-
-  constructor(reason: CachingPackageJsonReaderError['reason']) {
-    super(reason);
-    this.reason = reason;
-  }
-}
-
-// Export the interface of this class, but not the class itself.
-export type {CachingPackageJsonReaderError};

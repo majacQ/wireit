@@ -1,10 +1,11 @@
 {
   "compilerOptions": {
-    "target": "es2022",
+    "target": "es2020",
     "module": "es2022",
     "moduleResolution": "node",
-    "useDefineForClassFields": true,
-    "lib": ["es2021"],
+    "esModuleInterop": true,
+    "useDefineForClassFields": false,
+    "lib": ["es2022"],
     "rootDir": "src",
     "outDir": "lib",
     "strict": true,
@@ -14,13 +15,10 @@
     "forceConsistentCasingInFileNames": true,
     "allowSyntheticDefaultImports": true,
     "useUnknownInCatchVariables": true,
+    "noImplicitOverride": true,
     "incremental": true,
     "tsBuildInfoFile": ".tsbuildinfo",
-    // TODO(aomarks) skipLibCheck is temporarily true because the @actions/cache
-    // dependency is missing the file "lib/internal/contracts.d.ts". We hit this
-    // because we import directly from "lib/internal". See
-    // https://github.com/google/wireit/issues/107 for details.
-    "skipLibCheck": true
+    "composite": true
   },
   "include": ["src/**/*.ts"],
   "exclude": []

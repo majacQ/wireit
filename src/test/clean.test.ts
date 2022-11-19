@@ -9,6 +9,7 @@ import * as assert from 'uvu/assert';
 import {timeout} from './util/uvu-timeout.js';
 import {WireitTestRig} from './util/test-rig.js';
 import * as pathlib from 'path';
+import {checkScriptOutput} from './util/check-script-output.js';
 
 const test = suite<{rig: WireitTestRig}>();
 
@@ -299,13 +300,18 @@ test(
     const result = rig.exec('npm run a', {cwd: 'foo'});
     const done = await result.exit;
     assert.equal(done.code, 1);
-    assert.equal(
-      done.stderr.trim(),
+    checkScriptOutput(
+      done.stderr,
       `
-❌ [a] Invalid config: refusing to delete output file outside of package: ${pathlib.join(
-        rig.temp,
-        'outside'
-      )}`.trim()
+❌ package.json:8:17 Output files must be within the package: ${JSON.stringify(
+        pathlib.join(rig.temp, 'outside')
+      )} was outside ${JSON.stringify(pathlib.join(rig.temp, 'foo'))}
+          "output": [
+                    ~
+            "../outside"
+    ~~~~~~~~~~~~~~~~~~~~
+          ]
+    ~~~~~~~`
     );
     assert.equal(cmdA.numInvocations, 0);
 
@@ -333,12 +339,12 @@ test(
             // Include a dependency on a script with no input files to cover an
             // edge case that was broken in an earlier implementation.
             //
-            // We use the ".wireit/<script>/state" file to find out which input
-            // files were present in the previous run, so that we can compare
-            // them to the current input files. However, in an earlier
-            // implementation we did not save a "state" file for scripts with a
-            // dependency that have no input files (because that makes the
-            // script "uncacheable").
+            // We use the ".wireit/<script>/fingerprint" file to find out which
+            // input files were present in the previous run, so that we can
+            // compare them to the current input files. However, in an earlier
+            // implementation we did not save a "fingerprint" file for scripts
+            // with a dependency that have no input files (because that makes
+            // the script "uncacheable").
             dependencies: ['b'],
           },
           b: {
@@ -521,6 +527,41 @@ test(
       assert.equal(res.code, 0);
       assert.equal(cmdA.numInvocations, 2);
     }
+  })
+);
+
+test(
+  'leading slash on output glob is package relative',
+  timeout(async ({rig}) => {
+    const cmdA = await rig.newCommand();
+    await rig.write({
+      'package.json': {
+        scripts: {
+          a: 'wireit',
+        },
+        wireit: {
+          a: {
+            command: cmdA.command,
+            output: ['/output'],
+          },
+        },
+      },
+      output: 'foo',
+    });
+
+    // Output should exist before we run the script.
+    assert.ok(await rig.exists('output'));
+
+    // Output should be deleted between running the script and executing the
+    // command.
+    const exec = rig.exec('npm run a');
+    const inv = await cmdA.nextInvocation();
+    assert.not(await rig.exists('output'));
+
+    inv.exit(0);
+    const res = await exec.exit;
+    assert.equal(res.code, 0);
+    assert.equal(cmdA.numInvocations, 1);
   })
 );
 

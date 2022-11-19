@@ -3,4 +3,5 @@
 /node_modules
 /temp
 /vscode-extension/lib
+/vscode-extension/built
 .wireit

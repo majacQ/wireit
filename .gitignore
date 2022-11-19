@@ -1,3 +1,4 @@
+/.eslintcache
 /.tsbuildinfo
 /.wireit
 /*.tgz
@@ -10,6 +11,11 @@
 /vscode-extension/.tsbuildinfo
 /vscode-extension/.vscode-test
 /vscode-extension/*.vsix
-/vscode-extension/schema.json
+/vscode-extension/built
+
+/website/.wireit
+/website/_site
+/website/node_modules
 
 .DS_Store
+

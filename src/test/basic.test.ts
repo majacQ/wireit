@@ -8,7 +8,8 @@ import {suite} from 'uvu';
 import * as assert from 'uvu/assert';
 import {timeout} from './util/uvu-timeout.js';
 import {WireitTestRig} from './util/test-rig.js';
-import {IS_WINDOWS} from './util/windows.js';
+import {IS_WINDOWS} from '../util/windows.js';
+import {NODE_MAJOR_VERSION} from './util/node-version.js';
 
 const test = suite<{rig: WireitTestRig}>();
 
@@ -147,37 +148,6 @@ test(
 );
 
 test(
-  'runs one script that fails',
-  timeout(async ({rig}) => {
-    const cmdA = await rig.newCommand();
-    await rig.write({
-      'package.json': {
-        scripts: {
-          a: 'wireit',
-        },
-        wireit: {
-          a: {
-            command: cmdA.command,
-          },
-        },
-      },
-    });
-    const exec = rig.exec('npm run a');
-
-    const invA = await cmdA.nextInvocation();
-    invA.stdout('a stdout');
-    invA.stderr('a stderr');
-    invA.exit(1);
-
-    const res = await exec.exit;
-    assert.equal(res.code, 1);
-    assert.equal(cmdA.numInvocations, 1);
-    assert.match(res.stdout, 'a stdout');
-    assert.match(res.stderr, 'a stderr');
-  })
-);
-
-test(
   'dependency chain in one package that succeeds',
   timeout(async ({rig}) => {
     // a --> b --> c
@@ -288,51 +258,6 @@ test(
 );
 
 test(
-  'dependency chain in one package that fails in the middle',
-  timeout(async ({rig}) => {
-    // a --> b* --> c
-    const cmdA = await rig.newCommand();
-    const cmdB = await rig.newCommand();
-    const cmdC = await rig.newCommand();
-    await rig.write({
-      'package.json': {
-        scripts: {
-          a: 'wireit',
-          b: 'wireit',
-          c: 'wireit',
-        },
-        wireit: {
-          a: {
-            command: cmdA.command,
-            dependencies: ['b'],
-          },
-          b: {
-            command: cmdB.command,
-            dependencies: ['c'],
-          },
-          c: {
-            command: cmdC.command,
-          },
-        },
-      },
-    });
-    const exec = rig.exec('npm run a');
-
-    const invC = await cmdC.nextInvocation();
-    invC.exit(0);
-
-    const invB = await cmdB.nextInvocation();
-    invB.exit(42);
-
-    const res = await exec.exit;
-    assert.equal(res.code, 1);
-    assert.equal(cmdA.numInvocations, 0);
-    assert.equal(cmdB.numInvocations, 1);
-    assert.equal(cmdC.numInvocations, 1);
-  })
-);
-
-test(
   'dependency diamond in one package that succeeds',
   timeout(async ({rig}) => {
     //     a
@@ -409,6 +334,53 @@ test(
           a: {
             command: cmdA.command,
             dependencies: ['../bar:b'],
+          },
+        },
+      },
+      'bar/package.json': {
+        scripts: {
+          b: 'wireit',
+        },
+        wireit: {
+          b: {
+            command: cmdB.command,
+          },
+        },
+      },
+    });
+    const exec = rig.exec('npm run a', {cwd: 'foo'});
+
+    const invB = await cmdB.nextInvocation();
+    invB.exit(0);
+
+    const invA = await cmdA.nextInvocation();
+    invA.exit(0);
+
+    const res = await exec.exit;
+    assert.equal(res.code, 0);
+    assert.equal(cmdA.numInvocations, 1);
+    assert.equal(cmdB.numInvocations, 1);
+  })
+);
+
+test(
+  'cross-package dependency using object format',
+  timeout(async ({rig}) => {
+    const cmdA = await rig.newCommand();
+    const cmdB = await rig.newCommand();
+    await rig.write({
+      'foo/package.json': {
+        scripts: {
+          a: 'wireit',
+        },
+        wireit: {
+          a: {
+            command: cmdA.command,
+            dependencies: [
+              {
+                script: '../bar:b',
+              },
+            ],
           },
         },
       },
@@ -671,7 +643,9 @@ test(
   })
 );
 
-test(
+// Node workspaces are only supported in npm 7+, which shipped with Node v15.
+// eslint-disable-next-line @typescript-eslint/unbound-method
+(NODE_MAJOR_VERSION > 14 ? test : test.skip)(
   'commands run under npm workspaces',
   timeout(async ({rig}) => {
     const cmdA = await rig.newCommand();
@@ -721,6 +695,495 @@ test(
       assert.equal(cmdA.numInvocations, 2);
       assert.equal(cmdB.numInvocations, 1);
     }
+  })
+);
+
+test(
+  'finds package directory without npm_package_json',
+  timeout(async ({rig}) => {
+    // This confirms that we can walk up the filesystem to find the nearest
+    // package.json when the npm_package_json environment variable isn't set.
+    // This variable isn't set by yarn, pnpm, and older versions of npm.
+    const cmdA = await rig.newCommand();
+    await rig.write({
+      'package.json': {
+        scripts: {
+          a: 'wireit',
+        },
+        wireit: {
+          a: {
+            command: cmdA.command,
+          },
+        },
+      },
+    });
+    await rig.mkdir('foo/bar/baz');
+    const exec = rig.exec(
+      IS_WINDOWS
+        ? '..\\..\\..\\node_modules\\.bin\\wireit.cmd'
+        : '../../../node_modules/.bin/wireit',
+      {
+        cwd: 'foo/bar/baz',
+        env: {
+          npm_lifecycle_event: 'a',
+        },
+      }
+    );
+    (await cmdA.nextInvocation()).exit(0);
+    const res = await exec.exit;
+    assert.equal(res.code, 0);
+    assert.equal(cmdA.numInvocations, 1);
+  })
+);
+
+test(
+  'runs a script with yarn',
+  timeout(async ({rig}) => {
+    const cmdA = await rig.newCommand();
+    await rig.write({
+      'package.json': {
+        scripts: {
+          a: 'wireit',
+        },
+        wireit: {
+          a: {
+            command: cmdA.command,
+          },
+        },
+      },
+    });
+    const exec = rig.exec('yarn run a');
+    (await cmdA.nextInvocation()).exit(0);
+    const res = await exec.exit;
+    assert.equal(res.code, 0);
+    assert.equal(cmdA.numInvocations, 1);
+  })
+);
+
+test(
+  'runs a script with pnpm',
+  timeout(async ({rig}) => {
+    const cmdA = await rig.newCommand();
+    await rig.write({
+      'package.json': {
+        scripts: {
+          a: 'wireit',
+        },
+        wireit: {
+          a: {
+            command: cmdA.command,
+          },
+        },
+      },
+    });
+    const exec = rig.exec('pnpm run a');
+    (await cmdA.nextInvocation()).exit(0);
+    const res = await exec.exit;
+    assert.equal(res.code, 0);
+    assert.equal(cmdA.numInvocations, 1);
+  })
+);
+
+test(
+  'commands run under yarn workspaces',
+  timeout(async ({rig}) => {
+    const cmdA = await rig.newCommand();
+    const cmdB = await rig.newCommand();
+    await rig.write({
+      'package.json': {
+        // Yarn workspaces only work when the root is private.
+        private: true,
+        // Yarn is particular about packages having names and versions.
+        name: 'root',
+        version: '1.0.0',
+        workspaces: ['foo', 'bar'],
+      },
+      'foo/package.json': {
+        name: 'foo',
+        version: '1.0.0',
+        scripts: {
+          cmd: 'wireit',
+        },
+        wireit: {
+          cmd: {
+            command: cmdA.command,
+          },
+        },
+      },
+      'bar/package.json': {
+        name: 'bar',
+        version: '1.0.0',
+        scripts: {
+          cmd: 'wireit',
+        },
+        wireit: {
+          cmd: {
+            command: cmdB.command,
+          },
+        },
+      },
+    });
+
+    // Run both from the workspaces root package.
+    {
+      const exec = rig.exec('yarn workspaces run cmd');
+      // Workspace commands run in serial.
+      (await cmdA.nextInvocation()).exit(0);
+      (await cmdB.nextInvocation()).exit(0);
+      assert.equal((await exec.exit).code, 0);
+      assert.equal(cmdA.numInvocations, 1);
+      assert.equal(cmdB.numInvocations, 1);
+    }
+
+    // Run one from the workspace package.
+    {
+      const exec = rig.exec('yarn run cmd', {cwd: 'foo'});
+      (await cmdA.nextInvocation()).exit(0);
+      assert.equal((await exec.exit).code, 0);
+      assert.equal(cmdA.numInvocations, 2);
+      assert.equal(cmdB.numInvocations, 1);
+    }
+  })
+);
+
+test(
+  'commands run under pnpm workspaces',
+  timeout(async ({rig}) => {
+    const cmdA = await rig.newCommand();
+    const cmdB = await rig.newCommand();
+    await rig.write({
+      'pnpm-workspace.yaml': `
+        packages:
+          - foo
+          - bar
+      `,
+      'foo/package.json': {
+        scripts: {
+          cmd: 'wireit',
+        },
+        wireit: {
+          cmd: {
+            command: cmdA.command,
+          },
+        },
+      },
+      'bar/package.json': {
+        scripts: {
+          cmd: 'wireit',
+        },
+        wireit: {
+          cmd: {
+            command: cmdB.command,
+          },
+        },
+      },
+    });
+
+    // Run both from the workspaces root package.
+    {
+      const exec = rig.exec('pnpm run --recursive cmd');
+      // Workspace commands run in serial.
+      (await cmdA.nextInvocation()).exit(0);
+      (await cmdB.nextInvocation()).exit(0);
+      assert.equal((await exec.exit).code, 0);
+      assert.equal(cmdA.numInvocations, 1);
+      assert.equal(cmdB.numInvocations, 1);
+    }
+
+    // Run one from the workspace package.
+    {
+      const exec = rig.exec('pnpm run cmd', {cwd: 'foo'});
+      (await cmdA.nextInvocation()).exit(0);
+      assert.equal((await exec.exit).code, 0);
+      assert.equal(cmdA.numInvocations, 2);
+      assert.equal(cmdB.numInvocations, 1);
+    }
+  })
+);
+
+test(
+  'multiple cross-package dependencies',
+  timeout(async ({rig}) => {
+    const cmdA = await rig.newCommand();
+    const cmdB = await rig.newCommand();
+    const cmdC = await rig.newCommand();
+    await rig.write({
+      'foo/package.json': {
+        scripts: {
+          a: 'wireit',
+        },
+        wireit: {
+          a: {
+            command: cmdA.command,
+            dependencies: ['../bar:b', '../baz:c'],
+          },
+        },
+      },
+      'bar/package.json': {
+        scripts: {
+          b: 'wireit',
+        },
+        wireit: {
+          b: {
+            command: cmdB.command,
+          },
+        },
+      },
+      'baz/package.json': {
+        scripts: {
+          c: 'wireit',
+        },
+        wireit: {
+          c: {
+            command: cmdC.command,
+          },
+        },
+      },
+    });
+
+    const exec = rig.exec('npm run a', {cwd: 'foo'});
+
+    const invC = await cmdC.nextInvocation();
+    invC.exit(0);
+
+    const invB = await cmdB.nextInvocation();
+    invB.exit(0);
+
+    const invA = await cmdA.nextInvocation();
+    invA.exit(0);
+
+    const res = await exec.exit;
+    assert.equal(res.code, 0);
+    assert.equal(cmdA.numInvocations, 1);
+    assert.equal(cmdB.numInvocations, 1);
+    assert.equal(cmdC.numInvocations, 1);
+  })
+);
+
+test(
+  'top-level SIGINT kills running scripts',
+  timeout(async ({rig}) => {
+    const main = await rig.newCommand();
+    await rig.write({
+      'package.json': {
+        scripts: {
+          main: 'wireit',
+        },
+        wireit: {
+          main: {
+            command: main.command,
+          },
+        },
+      },
+    });
+
+    const wireit = rig.exec('npm run main');
+    const inv = await main.nextInvocation();
+    wireit.kill();
+    await inv.closed;
+    await wireit.exit;
+    assert.equal(main.numInvocations, 1);
+  })
+);
+
+for (const agent of ['npm', 'yarn', 'pnpm']) {
+  test(
+    `can pass extra args with using "${agent} run --"`,
+    timeout(async ({rig}) => {
+      const cmdA = await rig.newCommand();
+      await rig.write({
+        'package.json': {
+          scripts: {
+            a: 'wireit',
+          },
+          wireit: {
+            a: {
+              command: cmdA.command,
+              // Explicit empty input and output files so that we can be fresh.
+              files: [],
+              output: [],
+            },
+          },
+        },
+      });
+
+      // Initially stale.
+      {
+        const wireit = rig.exec(`${agent} run a -- foo -bar --baz`);
+        const inv = await cmdA.nextInvocation();
+        assert.equal((await inv.environment()).argv.slice(3), [
+          'foo',
+          '-bar',
+          '--baz',
+        ]);
+        inv.exit(0);
+        assert.equal((await wireit.exit).code, 0);
+      }
+
+      // Nothing changed, fresh.
+      {
+        const wireit = rig.exec(`${agent} run a -- foo -bar --baz`);
+        assert.equal((await wireit.exit).code, 0);
+      }
+
+      // Changing the extra args should change the fingerprint so that we're
+      // stale.
+      {
+        const wireit = rig.exec(`${agent} run a -- FOO -BAR --BAZ`);
+        const inv = await cmdA.nextInvocation();
+        assert.equal((await inv.environment()).argv.slice(3), [
+          'FOO',
+          '-BAR',
+          '--BAZ',
+        ]);
+        inv.exit(0);
+        assert.equal((await wireit.exit).code, 0);
+      }
+    })
+  );
+}
+
+test(
+  'cascade:false dependency does not inherit fingerprint',
+  timeout(async ({rig}) => {
+    //  a --[cascade:false]--> b --> c
+    const a = await rig.newCommand();
+    const b = await rig.newCommand();
+    const c = await rig.newCommand();
+    await rig.write({
+      'package.json': {
+        scripts: {
+          a: 'wireit',
+          b: 'wireit',
+          c: 'wireit',
+        },
+        wireit: {
+          a: {
+            command: a.command,
+            dependencies: [
+              {
+                script: 'b',
+                cascade: false,
+              },
+            ],
+            files: ['inputs/a'],
+            output: [],
+          },
+          b: {
+            command: b.command,
+            dependencies: ['c'],
+            files: ['inputs/b'],
+            output: [],
+          },
+          c: {
+            command: c.command,
+            files: ['inputs/c'],
+            output: [],
+          },
+        },
+      },
+    });
+
+    // Initially everything runs.
+    {
+      await rig.write('inputs/a', 'v1');
+      await rig.write('inputs/b', 'v1');
+      await rig.write('inputs/c', 'v1');
+      const wireit = rig.exec('npm run a');
+      (await c.nextInvocation()).exit(0);
+      (await b.nextInvocation()).exit(0);
+      (await a.nextInvocation()).exit(0);
+      assert.equal((await wireit.exit).code, 0);
+      assert.equal(a.numInvocations, 1);
+      assert.equal(b.numInvocations, 1);
+      assert.equal(c.numInvocations, 1);
+    }
+
+    // Changing input of B re-runs B but not A.
+    {
+      await rig.write('inputs/b', 'v2');
+      const wireit = rig.exec('npm run a');
+      (await b.nextInvocation()).exit(0);
+      assert.equal((await wireit.exit).code, 0);
+      assert.equal(a.numInvocations, 1);
+      assert.equal(b.numInvocations, 2);
+      assert.equal(c.numInvocations, 1);
+    }
+
+    // Changing input of C re-runs B and C but not A.
+    {
+      await rig.write('inputs/c', 'v2');
+      const wireit = rig.exec('npm run a');
+      (await c.nextInvocation()).exit(0);
+      (await b.nextInvocation()).exit(0);
+      assert.equal((await wireit.exit).code, 0);
+      assert.equal(a.numInvocations, 1);
+      assert.equal(b.numInvocations, 3);
+      assert.equal(c.numInvocations, 2);
+    }
+
+    // Changing input of A re-runs A (just to be sure!).
+    {
+      await rig.write('inputs/a', 'v2');
+      const wireit = rig.exec('npm run a');
+      (await a.nextInvocation()).exit(0);
+      assert.equal((await wireit.exit).code, 0);
+      assert.equal(a.numInvocations, 2);
+      assert.equal(b.numInvocations, 3);
+      assert.equal(c.numInvocations, 2);
+    }
+  })
+);
+
+test(
+  'can write fingerprint file for extremely large script graph',
+  timeout(async ({rig}) => {
+    // These numbers found experimentally, they were just enough to trigger an
+    // "Invalid string length" error from JSON.stringify while trying to write
+    // the fingerprint file.
+    const numScripts = 20;
+    const numInputFilesPerScript = 5;
+
+    const packageJson: {
+      scripts: Record<string, string>;
+      wireit: Record<
+        string,
+        {
+          command: string;
+          files: string[];
+          output: string[];
+          dependencies: string[];
+        }
+      >;
+    } = {
+      scripts: {},
+      wireit: {},
+    };
+    const files: Record<string, string | object> = {
+      'package.json': packageJson,
+    };
+    for (let s = 0; s < numScripts; s++) {
+      packageJson.scripts[s] = 'wireit';
+      packageJson.wireit[s] = {
+        command: 'true',
+        files: [`inputs/${s}/*`],
+        output: [],
+        dependencies: [],
+      };
+      for (let f = 0; f < numInputFilesPerScript; f++) {
+        files[`inputs/${s}/${f}`] = '';
+      }
+      // Add an explicit dependency on all subsequent scripts. This causes the
+      // fingerprint size to grow much faster than only including the next
+      // script.
+      for (let d = s + 1; d < numScripts; d++) {
+        packageJson.wireit[s].dependencies.push(`${d}`);
+      }
+    }
+    await rig.write(files);
+
+    const wireit = rig.exec('npm run 0');
+    assert.equal((await wireit.exit).code, 0);
   })
 );
 

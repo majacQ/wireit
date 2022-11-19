@@ -8,8 +8,10 @@ import {suite} from 'uvu';
 import * as assert from 'uvu/assert';
 import {timeout, wait} from './util/uvu-timeout.js';
 import {WireitTestRig} from './util/test-rig.js';
-import {PackageJson} from '../util/package-json-reader.js';
 import * as os from 'os';
+import {IS_WINDOWS} from '../util/windows.js';
+
+import type {PackageJson} from './util/package-json.js';
 
 const test = suite<{rig: WireitTestRig}>();
 
@@ -183,6 +185,126 @@ test(
       assert.equal(cmd.numInvocations, 1);
     }
     assert.equal(main.numInvocations, 1);
+  })
+);
+
+test(
+  'should fall back to default parallelism with empty WIREIT_PARALLEL',
+  timeout(async ({rig}) => {
+    const dep1 = await rig.newCommand();
+    const dep2 = await rig.newCommand();
+    const main = await rig.newCommand();
+    await rig.write({
+      'package.json': {
+        scripts: {
+          dep1: 'wireit',
+          dep2: 'wireit',
+          main: 'wireit',
+        },
+        wireit: {
+          dep1: {command: dep1.command},
+          dep2: {command: dep2.command},
+          main: {command: main.command, dependencies: ['dep1', 'dep2']},
+        },
+      },
+    });
+
+    const exec = rig.exec('npm run main', {env: {WIREIT_PARALLEL: ''}});
+    const [inv1, inv2] = await Promise.all([
+      dep1.nextInvocation(),
+      dep2.nextInvocation(),
+    ]);
+    assert.equal(main.numInvocations, 0);
+    inv1.exit(0);
+    inv2.exit(0);
+    (await main.nextInvocation()).exit(0);
+    const res = await exec.exit;
+    assert.equal(res.code, 0);
+    assert.equal(dep1.numInvocations, 1);
+    assert.equal(dep2.numInvocations, 1);
+    assert.equal(main.numInvocations, 1);
+  })
+);
+
+test(
+  'scripts acquire exclusive locks across wireit processes',
+  timeout(
+    async ({rig}) => {
+      const cmdA = await rig.newCommand();
+      await rig.write({
+        'package.json': {
+          scripts: {
+            a: 'wireit',
+          },
+          wireit: {
+            a: {
+              command: cmdA.command,
+            },
+          },
+        },
+      });
+
+      // Start up <concurrency> simultaneous Wireit invocations for the same
+      // script.
+      const concurrency = 10;
+      const wireits = [];
+      for (let i = 0; i < concurrency; i++) {
+        wireits.push(rig.exec('npm run a'));
+      }
+
+      // Wait a moment to give a chance for scripts to start up.
+      await new Promise((resolve) => setTimeout(resolve, 500));
+
+      // Wait for each command invocation to start, and check that only one starts
+      // at a time.
+      for (let i = 0; i < concurrency; i++) {
+        const inv = await cmdA.nextInvocation();
+        // Note that numInvocations is incremented as soon as the script starts,
+        // even if we haven't called nextInvocation yet.
+        assert.equal(cmdA.numInvocations, i + 1);
+        inv.exit(0);
+      }
+
+      for (const exec of wireits) {
+        assert.equal((await exec.exit).code, 0);
+      }
+
+      assert.equal(cmdA.numInvocations, concurrency);
+    },
+    IS_WINDOWS ? 60_000 : undefined
+  )
+);
+
+test(
+  "scripts don't acquire exclusive locks when output=[]",
+  timeout(async ({rig}) => {
+    const cmdA = await rig.newCommand();
+    await rig.write({
+      'package.json': {
+        scripts: {
+          a: 'wireit',
+        },
+        wireit: {
+          a: {
+            command: cmdA.command,
+            output: [],
+          },
+        },
+      },
+    });
+
+    // When output=[], we don't acquire an exclusive lock.
+    const exec1 = rig.exec('npm run a');
+    const exec2 = rig.exec('npm run a');
+    const inv1 = await cmdA.nextInvocation();
+    // inv2 couldn't start if we did acquire an exclusive lock, because inv1 is
+    // still running.
+    const inv2 = await cmdA.nextInvocation();
+    inv1.exit(0);
+    inv2.exit(0);
+    assert.equal((await exec1.exit).code, 0);
+    assert.equal((await exec2.exit).code, 0);
+    assert.equal(cmdA.numInvocations, 2);
   })
 );
 

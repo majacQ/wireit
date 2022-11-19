@@ -9,20 +9,38 @@ import {unreachable} from '../util/unreachable.js';
 
 import type {Event} from '../event.js';
 import type {Logger} from './logger.js';
-import type {PackageReference, ScriptReference} from '../script.js';
+import type {PackageReference, ScriptReference} from '../config.js';
+import {DiagnosticPrinter} from '../error.js';
+import {createRequire} from 'module';
+
+const getWireitVersion = (() => {
+  let version: string | undefined;
+  return () => {
+    if (version === undefined) {
+      version = (
+        createRequire(import.meta.url)('../../package.json') as {
+          version: string;
+        }
+      ).version;
+    }
+    return version;
+  };
+})();
 
 /**
  * Default {@link Logger} which logs to stdout and stderr.
  */
 export class DefaultLogger implements Logger {
-  readonly #rootPackageDir: string;
+  private readonly _rootPackageDir: string;
+  private readonly _diagnosticPrinter: DiagnosticPrinter;
 
   /**
    * @param rootPackage The npm package directory that the root script being
    * executed belongs to.
    */
   constructor(rootPackage: string) {
-    this.#rootPackageDir = rootPackage;
+    this._rootPackageDir = rootPackage;
+    this._diagnosticPrinter = new DiagnosticPrinter(this._rootPackageDir);
   }
 
   /**
@@ -30,12 +48,12 @@ export class DefaultLogger implements Logger {
    * the script name. If the package is different to the root package, it is
    * disambiguated with a relative path.
    */
-  #label(script: PackageReference | ScriptReference) {
+  private _label(script: PackageReference | ScriptReference) {
     const packageDir = script.packageDir;
     const scriptName = 'name' in script ? script.name : undefined;
-    if (packageDir !== this.#rootPackageDir) {
+    if (packageDir !== this._rootPackageDir) {
       const relativePackageDir = pathlib
-        .relative(this.#rootPackageDir, script.packageDir)
+        .relative(this._rootPackageDir, script.packageDir)
         // Normalize to posix-style forward-slashes as the path separator, even
         // on Windows which usually uses back-slashes. This way labels match the
         // syntax used in the package.json dependency specifiers (which are
@@ -54,7 +72,7 @@ export class DefaultLogger implements Logger {
 
   log(event: Event) {
     const type = event.type;
-    const label = this.#label(event.script);
+    const label = this._label(event.script);
     const prefix = label !== '' ? ` [${label}]` : '';
     switch (type) {
       default: {
@@ -98,12 +116,8 @@ export class DefaultLogger implements Logger {
             );
           }
           case 'launched-incorrectly': {
-            console.error(`❌${prefix} wireit must be launched with "npm run"`);
-            break;
-          }
-          case 'old-npm-version': {
             console.error(
-              `❌${prefix} wireit must be run with npm at least v${event.minNpmVersion}.`
+              `❌${prefix} wireit must be launched with "npm run" or a compatible command.`
             );
             console.error(`    More info: ${event.detail}`);
             break;
@@ -114,26 +128,28 @@ export class DefaultLogger implements Logger {
             );
             break;
           }
-          case 'invalid-package-json': {
+          case 'invalid-json-syntax': {
+            for (const diagnostic of event.diagnostics) {
+              console.error(this._diagnosticPrinter.print(diagnostic));
+            }
+            break;
+          }
+
+          case 'no-scripts-in-package-json': {
             console.error(
-              `❌${prefix} Invalid JSON in package.json file in ${event.script.packageDir}`
+              `❌${prefix} No "scripts" section defined in package.json in ${event.script.packageDir}`
             );
             break;
           }
-          case 'script-not-found': {
-            console.error(
-              `❌${prefix} No script named "${event.script.name}" was found in ${event.script.packageDir}`
-            );
-            break;
-          }
-          case 'script-not-wireit': {
-            console.error(
-              `❌${prefix} Script is not configured to call "wireit"`
-            );
-            break;
-          }
-          case 'invalid-config-syntax': {
-            console.error(`❌${prefix} Invalid config: ${event.message}`);
+          case 'script-not-found':
+          case 'wireit-config-but-no-script':
+          case 'duplicate-dependency':
+          case 'script-not-wireit':
+          case 'invalid-config-syntax':
+          case 'cycle':
+          case 'dependency-on-missing-package-json':
+          case 'dependency-on-missing-script': {
+            console.error(this._diagnosticPrinter.print(event.diagnostic));
             break;
           }
           case 'invalid-usage': {
@@ -146,12 +162,7 @@ export class DefaultLogger implements Logger {
             );
             break;
           }
-          case 'duplicate-dependency': {
-            console.error(
-              `❌${prefix} The dependency "${event.dependency.name}" was declared multiple times`
-            );
-            break;
-          }
+
           case 'signal': {
             console.error(`❌${prefix} Failed with signal ${event.signal}`);
             break;
@@ -160,30 +171,43 @@ export class DefaultLogger implements Logger {
             console.error(`❌${prefix} Process spawn error: ${event.message}`);
             break;
           }
-          case 'cycle': {
-            console.error(`❌${prefix} Cycle detected`);
-            // Display the trail of scripts and indicate where the loop is, like
-            // this:
-            //
-            //     a
-            // .-> b
-            // |   c
-            // `-- b
-            const cycleEnd = event.trail.length - 1;
-            const cycleStart = cycleEnd - event.length;
-            for (let i = 0; i < event.trail.length; i++) {
-              if (i < cycleStart) {
-                process.stderr.write('    ');
-              } else if (i === cycleStart) {
-                process.stderr.write(`.-> `);
-              } else if (i !== cycleEnd) {
-                process.stderr.write('|   ');
-              } else {
-                process.stderr.write('`-- ');
-              }
-              process.stderr.write(this.#label(event.trail[i]));
-              process.stderr.write('\n');
+          case 'start-cancelled': {
+            // The script never started. We don't really need to log this, it's
+            // fairly noisy. Maybe in a verbose mode.
+            break;
+          }
+          case 'killed': {
+            console.error(`💀${prefix} Killed`);
+            break;
+          }
+          case 'unknown-error-thrown': {
+            console.error(
+              `❌${prefix} Internal error! Please file a bug at https://github.com/google/wireit/issues/new, mention this message, that you encountered it in wireit version ${getWireitVersion()}, and give information about your package.json files.\n    Unknown error thrown: ${String(
+                event.error
+              )}`
+            );
+            const maybeError = event.error as Partial<Error> | undefined;
+            if (maybeError?.stack) {
+              console.error(maybeError.stack);
             }
+            break;
+          }
+          case 'dependency-invalid': {
+            console.error(
+              `❌${prefix} Depended, perhaps indirectly, on ${this._label(
+                event.dependency
+              )} which could not be validated. Please file a bug at https://github.com/google/wireit/issues/new, mention this message, that you encountered it in wireit version ${getWireitVersion()}, and give information about your package.json files.`
+            );
+            break;
+          }
+          case 'service-exited-unexpectedly': {
+            console.error(`❌${prefix} Service exited unexpectedly`);
+            break;
+          }
+          case 'aborted':
+          case 'dependency-service-exited-unexpectedly': {
+            // These event isn't very useful to log, because they are downstream
+            // of failures that already get reported elsewhere.
             break;
           }
         }
@@ -222,7 +246,21 @@ export class DefaultLogger implements Logger {
           }
           case 'running': {
             console.log(
-              `🏃${prefix} Running command "${event.script.command ?? ''}"`
+              `🏃${prefix} Running command "${
+                event.script.command?.value ?? ''
+              }"`
+            );
+            break;
+          }
+          case 'locked': {
+            console.log(
+              `💤${prefix} Waiting for another process which is already running this script.`
+            );
+            break;
+          }
+          case 'output-modified': {
+            console.log(
+              `ℹ️${prefix} Output files were modified since the previous run.`
             );
             break;
           }
@@ -246,6 +284,14 @@ export class DefaultLogger implements Logger {
           }
           case 'generic': {
             console.log(`ℹ️${prefix} ${event.message}`);
+            break;
+          }
+          case 'service-started': {
+            console.log(`⬆️${prefix} Service started`);
+            break;
+          }
+          case 'service-stopped': {
+            console.log(`⬇️${prefix} Service stopped`);
             break;
           }
         }

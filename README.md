@@ -1,9 +1,13 @@
-<img src="wireit.svg" height="80" alt="wireit"/>
+<div align="center">
 
-> Wireit upgrades your npm scripts to make them smarter and more efficient.
+<img src="wireit.svg" height="125" alt="wireit"/>
+
+_Wireit upgrades your npm scripts to make them smarter and more efficient._
 
 [![Published on npm](https://img.shields.io/npm/v/wireit.svg?logo=npm)](https://www.npmjs.com/package/wireit)
 [![Build Status](https://github.com/google/wireit/actions/workflows/tests.yml/badge.svg)](https://github.com/google/wireit/actions/workflows/tests.yml)
+
+</div>
 
 ## Features
 
@@ -14,19 +18,17 @@
 - ♻️ Cache output locally and remotely on GitHub Actions for free
 - 🛠️ Works with single packages, npm workspaces, and other monorepos
 
-## Alpha
-
-> ### 🚧 Wireit is alpha software — in active but early development. You are welcome to try it out, but note there a number of [missing features and issues](https://github.com/google/wireit/issues) that you may run into! 🚧
-
 ## Contents
 
 - [Features](#features)
 - [Install](#install)
 - [Setup](#setup)
+- [VSCode Extension](#vscode-extension)
 - [Dependencies](#dependencies)
   - [Vanilla scripts](#vanilla-scripts)
   - [Cross-package dependencies](#cross-package-dependencies)
 - [Parallelism](#parallelism)
+- [Extra arguments](#extra-arguments)
 - [Input and output files](#input-and-output-files)
 - [Incremental build](#incremental-build)
 - [Caching](#caching)
@@ -34,15 +36,19 @@
   - [GitHub Actions caching](#github-actions-caching)
 - [Cleaning output](#cleaning-output)
 - [Watch mode](#watch-mode)
+- [Services](#services)
+- [Execution cascade](#execution-cascade)
+- [Failures and errors](#failures-and-errors)
 - [Package locks](#package-locks)
 - [Recipes](#recipes)
   - [TypeScript](#typescript)
+  - [ESLint](#eslint)
 - [Reference](#reference)
   - [Configuration](#configuration)
   - [Dependency syntax](#dependency-syntax)
   - [Environment variables](#environment-variables)
   - [Glob patterns](#glob-patterns)
-  - [Cache key](#cache-key)
+  - [Fingerprint](#fingerprint)
 - [Requirements](#requirements)
 - [Related tools](#related-tools)
 - [Contributing](#contributing)
@@ -92,13 +98,25 @@ and replace the original script with the `wireit` command.
 </table>
 
 Now when you run `npm run build`, Wireit upgrades the script to be smarter and
-more efficient.
+more efficient. Wireit works with [yarn](https://yarnpkg.com/)
+(both 1.X "[Classic](https://classic.yarnpkg.com/)" and its successor "Berry")
+and [pnpm](https://pnpm.io/), too.
 
 You should also add `.wireit` to your `.gitignore` file. Wireit uses the
 `.wireit` directory to store caches and other data for your scripts.
 
 ```sh
 echo .wireit >> .gitignore
+```
+
+## VSCode Extension
+
+If you use VSCode, consider installing the `google.wireit` extension. It adds documentation on hover, autocomplete, can diagnose a number of common mistakes, and even suggest a refactoring to convert an npm script to use wireit.
+
+Install it [from the marketplace](https://marketplace.visualstudio.com/items?itemName=google.wireit) or on the command line like:
+
+```
+code --install-extension google.wireit
 ```
 
 ## Dependencies
@@ -173,8 +191,8 @@ graph TD
   end
 ```
 
-By default, Wireit will run up to 4 scripts in parallel for every CPU core
-detected on your system. To change this default, set the `WIREIT_PARALLEL`
+By default, Wireit will run up to 2 scripts in parallel for every logical CPU
+core detected on your system. To change this default, set the `WIREIT_PARALLEL`
 [environment variable](#environment-variables) to a positive integer, or
 `infinity` to run without a limit. You may want to lower this number if you
 experience resource starvation in large builds. For example, to run only one
@@ -183,6 +201,23 @@ script at a time:
 ```sh
 export WIREIT_PARALLEL=1
 npm run build
+```
+
+If two or more seperate `npm run` commands are run for the same Wireit script
+simultaneously, then only one instance will be allowed to run at a time, while
+the others wait their turn. This prevents coordination problems that can result
+in incorrect output files being produced. If `output` is set to an empty array,
+then this restriction is removed.
+
+## Extra arguments
+
+As with plain npm scripts, you can pass extra arguments to a Wireit script by
+placing a `--` double-dash argument in front of them. Any arguments after a `--`
+are sent to the underlying command, instead of being interpreted as arguments to
+npm or Wireit:
+
+```sh
+npm run build -- --verbose
 ```
 
 ## Input and output files
@@ -197,9 +232,9 @@ Setting these properties allow you to use more features of Wireit:
 |                                             | Requires<br>`files` | Requires<br>`output` |
 | ------------------------------------------: | :-----------------: | :------------------: |
 |       [**Dependency graph**](#dependencies) |          -          |          -           |
-| [**Incremental build**](#incremental-build) |         ☑️          |          -           |
 |               [**Watch mode**](#watch-mode) |         ☑️          |          -           |
 |         [**Clean build**](#cleaning-output) |          -          |          ☑️          |
+| [**Incremental build**](#incremental-build) |         ☑️          |          ☑️          |
 |                     [**Caching**](#caching) |         ☑️          |          ☑️          |
 
 #### Example configuration
@@ -226,27 +261,42 @@ Setting these properties allow you to use more features of Wireit:
 }
 ```
 
+#### Default excluded paths
+
+By default, the following folders are excluded from the `files` and `output`
+arrays:
+
+- `.git/`
+- `.hg/`
+- `.svn/`
+- `.wireit/`
+- `CVS/`
+- `node_modules/`
+
+In the highly unusual case that you need to reference a file in one of those
+folders, set `allowUsuallyExcludedPaths: true` to remove all default excludes.
+
 ## Incremental build
 
 Wireit can automatically skip execution of a script if nothing has changed that
 would cause it to produce different output since the last time it ran. This is
-called _incremental build_. When a script is skipped, any `stdout` or `stderr`
-that it produced in the previous run is replayed.
+called _incremental build_.
 
-To enable incremental build, configure the input files for each script by
-specifying [glob patterns](#glob-patterns) in the `wireit.<script>.files` list.
+To enable incremental build, configure the input and output files for each
+script by specifying [glob patterns](#glob-patterns) in the
+`wireit.<script>.files` and `wireit.<script>.output` arrays.
 
-> ℹ️ If a script doesn't have a `files` list defined at all, then it will _always_
-> run, because Wireit doesn't know which files to check for changes. To tell
-> Wireit it is safe to skip execution of a script that definitely has no input
-> files, set `files` to an empty array (`files: []`).
+> ℹ️ If a script doesn't have a `files` or `output` list defined at all, then it
+> will _always_ run, because Wireit doesn't know which files to check for
+> changes. To tell Wireit it is safe to skip execution of a script that
+> definitely has no input and/or files, set `files` and/or `output` to an empty
+> array (`files: [], output: []`).
 
 ## Caching
 
 If a script has previously succeeded with the same configuration and input
 files, then Wireit can copy the output from a cache, instead of running the
-command. This can significantly improve build and test time. When a script is
-restored from cache, any `stdout` or `stderr` is replayed.
+command. This can significantly improve build and test time.
 
 To enable caching for a script, ensure you have defined both the [`files` and
 `output`](#input-and-output-files) arrays.
@@ -344,11 +394,11 @@ set the `wireit.<script>.clean` property to one of these values:
 In _watch_ mode, Wireit monitors all `files` of a script, and all `files` of its
 transitive dependencies, and when there is a change, it re-runs only the
 affected scripts. To enable watch mode, ensure that the
-[`files`](#input-and-output-files) array is defined, and add the `watch`
-argument:
+[`files`](#input-and-output-files) array is defined, and add the `--watch`
+flag:
 
 ```sh
-npm run <script> watch
+npm run <script> --watch
 ```
 
 The benefit of Wireit's watch mode over built-in watch modes are:
@@ -358,6 +408,231 @@ The benefit of Wireit's watch mode over built-in watch modes are:
 - It prevents problems that can occur when running many separate watch commands
   simultaneously, such as build steps being triggered before all preceding steps
   have finished.
+
+## Services
+
+By default, Wireit assumes that your scripts will eventually exit by themselves.
+This is well suited for build and test scripts, but not for long-running
+processes like servers. To tell Wireit that a process is long-running and not
+expected to exit by itself, set `"service": true`.
+
+```json
+{
+  "scripts": {
+    "start": "wireit",
+    "build:server": "wireit"
+  },
+  "wireit": {
+    "start": {
+      "command": "node my-server.js",
+      "service": true,
+      "files": ["my-server.js"],
+      "dependencies": [
+        "build:server",
+        {
+          "script": "../assets:build",
+          "cascade": false
+        }
+      ]
+    },
+    "build:server": {
+      ...
+    }
+  }
+}
+```
+
+### Service lifetime
+
+If a service is run _directly_ (e.g. `npm run serve`), then it will stay running
+until the user kills Wireit (e.g. `Ctrl-C`).
+
+If a service is a _dependency_ of one or more other scripts, then it will start
+up before any depending script runs, and will shut down after all depending
+scripts finish.
+
+### Service readiness
+
+By default, a service is considered _ready_ as soon as its process spawns,
+allowing any scripts that depend on that service to start.
+
+However, often times a service needs to perform certain actions before it is
+safe for dependents to interact with it, such as starting a server and listening
+on a network interface.
+
+Use `service.readyWhen.lineMatches` to tell Wireit to monitor the `stdout` and
+`stderr` of the service and defer readiness until a line is printed that matches
+the given regular expression.
+
+```json
+{
+  "command": "node my-server.js",
+  "service": {
+    "readyWhen": {
+      "lineMatches": "Server listening on port \\d+"
+    }
+  }
+}
+```
+
+### Service restarts
+
+In watch mode, a service will be restarted whenever one of its input files or
+dependencies change, except for dependencies with
+[`cascade`](#execution-cascade) set to `false`.
+
+### Service output
+
+Services cannot have `output` files, because there is no way for Wireit to know
+when a service has finished writing its output.
+
+If you have a service that produces output, you should define a _non-service_
+script that depends on it, and which exits when the service's output is
+complete.
+
+## Execution cascade
+
+By default, a script always needs to run (or restart in the case of
+[`services`](#services)) if any of its dependencies needed to run, _regardless
+of whether the dependency produced new or relevant output_.
+
+This automatic _cascade_ of script execution is the default behavior because it
+ensures that any _possible_ output produced by a dependent script propagates to all other
+scripts that might depend on it. In other words, Wireit does not assume that the
+`files` array completely describes the inputs to a script with dependencies.
+
+### Disabling cascade
+
+This execution cascade behavior can be disabled by expanding a dependency into
+an object, and setting the `cascade` property to `false`:
+
+> **Note**
+> What really happens under the hood is that the `cascade` property simply controls
+> whether the [fingerprint](#fingerprint) of a script _includes the fingerprints
+> of its dependencies_, which in turn determines whether a script needs to run or restart.
+
+```json
+{
+  "dependencies": [
+    {
+      "script": "foo",
+      "cascade": false
+    }
+  ]
+}
+```
+
+### Reasons to disable cascade
+
+There are two main reasons you might want to set `cascade` to `false`:
+
+1.  **Your script only consumes a subset of a dependency's output.**
+
+    For example, `tsc` produces both `.js` files and `.d.ts` files, but only the
+    `.js` files might be consumed by `rollup`. There is no need to re-bundle
+    when a typings-only changed occured.
+
+    > **Note**
+    > In addition to setting `cascade` to `false`, the subset of output that
+    > _does_ matter (`lib/**/*.js`) has been added to the `files` array.
+
+    ```json
+    {
+      "scripts": {
+        "build": "wireit",
+        "bundle": "wireit"
+      },
+      "wireit": {
+        "build": {
+          "command": "tsc",
+          "files": ["src/**/*.ts", "tsconfig.json"],
+          "output": ["lib/**"]
+        },
+        "bundle": {
+          "command": "rollup -c",
+          "dependencies": [
+            {
+              "script": "build",
+              "cascade": false
+            }
+          ],
+          "files": ["rollup.config.json", "lib/**/*.js"],
+          "output": ["dist/bundle.js"]
+        }
+      }
+    }
+    ```
+
+2.  **Your server doesn't need to restart for certain changes.**
+
+    For example, a web server depends on some static assets, but the server
+    reads those assets from disk dynamically on each request. In [`watch`](#watch-mode) mode,
+    there is no need to restart the server when the assets change.
+
+    > **Note**
+    > The `build:server` dependency uses the default `cascade` behavior
+    > (`true`), because changing the implementation of the server itself _does_
+    > require the server to be restarted.
+
+    ```json
+    {
+      "scripts": {
+        "start": "wireit",
+        "build:server": "wireit"
+      },
+      "wireit": {
+        "start": {
+          "command": "node lib/server.js",
+          "service": true,
+          "dependencies": [
+            "build:server",
+            {
+              "script": "../assets:build",
+              "cascade": false
+            }
+          ],
+          "files": ["lib/**/*.js"]
+        },
+        "build:server": {
+          "command": "tsc",
+          "files": ["src/**/*.ts", "tsconfig.json"],
+          "output": ["lib/**"]
+        }
+      }
+    }
+    ```
+
+## Failures and errors
+
+By default, when a script fails (meaning it returned with a non-zero exit code),
+all scripts that are already running are allowed to finish, but new scripts are
+not started.
+
+In some situations a different behavior may be better suited. There are 2
+additional modes, which you can set with the `WIREIT_FAILURES` environment
+variable. Note that Wireit always ultimately exits with a non-zero exit code if
+there was a failure, regardless of the mode.
+
+### Continue
+
+When a failure occurs in `continue` mode, running scripts continue, and new
+scripts are started as long as the failure did not affect their dependencies.
+This mode is useful if you want a complete picture of which scripts are
+succeeding and which are failing.
+
+```bash
+WIREIT_FAILURES=continue
+```
+
+### Kill
+
+When a failure occurs in `kill` mode, running scripts are immediately killed,
+and new scripts are not started. This mode is useful if you want to be notified
+as soon as possible about any failures.
+
+```bash
+WIREIT_FAILURES=kill
+```
 
 ## Package locks
 
@@ -405,55 +680,6 @@ This section contains advice about integrating specific build tools with Wireit.
 
 ### TypeScript
 
-#### Use incremental build
-
-Set [`"incremental": true`](https://www.typescriptlang.org/tsconfig#incremental)
-in your `tsconfig.json`, and use the
-[`--build`](https://www.typescriptlang.org/docs/handbook/project-references.html#build-mode-for-typescript)
-(or `-b`) flag in your `tsc` command. This enables TypeScript's incremental
-compilation mode, which significantly reduces compile times.
-
-#### Use clean if-file-deleted
-
-The [`"clean": "if-file-deleted"`](#cleaning-output) setting provides the best
-balance between fast and correct output, giving you an incremental build when a
-`.ts` source file is added or modified, and a clean build when a `.ts` source
-file is deleted.
-
-`"clean": true` (the default) is not a good option, because it either eliminates
-the benefits of incremental compilation, or causes your `.tsbuildinfo` to get
-out of sync, depending on whether you include your `.tsbuildinfo` file in the
-`output` array.
-
-`"clean": false` is also not a good option, because it causes stale outputs to
-accumulate. This is because when you delete or rename a `.ts` source file, `tsc`
-itself does not automatically delete the corresponding `.js` file emitted by
-previous compiles.
-
-#### Include .tsbuildinfo in output.
-
-Include your
-[`.tsbuildinfo`](https://www.typescriptlang.org/tsconfig#tsBuildInfoFile) file
-in your `output` array. Otherwise, when Wireit performs a clean build, the
-`.tsbuildinfo` file will get out-of-sync with the output, and `tsc` will wrongly
-skip emit because it believes the output is already up-to-date.
-
-#### Include tsconfig.json in files.
-
-Include your `tsconfig.json` file in your `files` array so that Wireit knows to
-re-run when you change a setting that affects compilation.
-
-#### Use the --pretty flag
-
-By default, `tsc` only shows colorful stylized output when it detects that it is
-attached to an interactive (TTY) terminal. The processes spawned by Wireit do
-not perceive themselves to be attached to an interactive terminal, because of
-the way Wireit captures `stdout` and `stderr` for replays. The
-[`--pretty`](https://www.typescriptlang.org/tsconfig#pretty) flag forces `tsc`
-to emit colorful stylized output even on non-interactive terminals.
-
-#### Example
-
 ```json
 {
   "scripts": {
@@ -470,6 +696,49 @@ to emit colorful stylized output even on non-interactive terminals.
 }
 ```
 
+- Set [`"incremental": true`](https://www.typescriptlang.org/tsconfig#incremental) and use
+  [`--build`](https://www.typescriptlang.org/docs/handbook/project-references.html#build-mode-for-typescript)
+  to enable incremental compilation, which significantly improves performance.
+- Include
+  [`.tsbuildinfo`](https://www.typescriptlang.org/tsconfig#tsBuildInfoFile) in
+  `output` so that it is reset on clean builds. Otherwise `tsc` will get out of
+  sync and produce incorrect output.
+- Set [`"clean": "if-file-deleted"`](#cleaning-output) so that you get fast
+  incremental compilation when sources are changed/added, but also stale outputs
+  are cleaned up when a source is deleted (`tsc` does not clean up stale outputs
+  by itself).
+- Include `tsconfig.json` in `files` so that changing your configuration re-runs
+  `tsc`.
+- Use [`--pretty`](https://www.typescriptlang.org/tsconfig#pretty) to get
+  colorful output despite not being attached to a TTY.
+
+### ESLint
+
+```json
+{
+  "scripts": {
+    "lint": "wireit"
+  },
+  "wireit": {
+    "lint": {
+      "command": "eslint --color --cache --cache-location .eslintcache .",
+      "files": ["src/**/*.ts", ".eslintignore", ".eslintrc.cjs"],
+      "output": []
+    }
+  }
+}
+```
+
+- Use
+  [`--cache`](https://eslint.org/docs/user-guide/command-line-interface#caching)
+  so that `eslint` only lints the files that were added or changed since the
+  last run, which significantly improves performance.
+- Use
+  [`--color`](https://eslint.org/docs/user-guide/command-line-interface#--color---no-color)
+  to get colorful output despite not being attached to a TTY.
+- Include config and ignore files in `files` so that changing your configuration
+  re-runs `eslint`.
+
 ## Reference
 
 ### Configuration
@@ -477,14 +746,17 @@ to emit colorful stylized output even on non-interactive terminals.
 The following properties can be set inside `wireit.<script>` objects in
 `package.json` files:
 
-| Property       | Type                           | Default                 | Description                                                                                                 |
-| -------------- | ------------------------------ | ----------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `command`      | `string`                       | `undefined`             | The shell command to run.                                                                                   |
-| `dependencies` | `string[]`                     | `undefined`             | [Scripts that must run before this one](#dependencies).                                                     |
-| `files`        | `string[]`                     | `undefined`             | Input file [glob patterns](#glob-patterns), used to determine the [cache key](#cache-key).                  |
-| `output`       | `string[]`                     | `undefined`             | Output file [glob patterns](#glob-patterns), used for [caching](#caching) and [cleaning](#cleaning-output). |
-| `clean`        | `boolean \| "if-file-deleted"` | `true`                  | [Delete output files before running](#cleaning-output).                                                     |
-| `packageLocks` | `string[]`                     | `['package-lock.json']` | [Names of package lock files](#package-locks).                                                              |
+| Property                  | Type                           | Default                 | Description                                                                                                 |
+| ------------------------- | ------------------------------ | ----------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `command`                 | `string`                       | `undefined`             | The shell command to run.                                                                                   |
+| `dependencies`            | `string[] \| object[]`         | `[]`                    | [Scripts that must run before this one](#dependencies).                                                     |
+| `dependencies[i].script`  | `string`                       | `undefined`             | [The name of the script, when the dependency is an object.](#dependencies).                                 |
+| `dependencies[i].cascade` | `boolean`                      | `true`                  | [Whether this dependency always causes this script to re-execute](#execution-cascade).                      |
+| `files`                   | `string[]`                     | `undefined`             | Input file [glob patterns](#glob-patterns), used to determine the [fingerprint](#fingerprint).              |
+| `output`                  | `string[]`                     | `undefined`             | Output file [glob patterns](#glob-patterns), used for [caching](#caching) and [cleaning](#cleaning-output). |
+| `clean`                   | `boolean \| "if-file-deleted"` | `true`                  | [Delete output files before running](#cleaning-output).                                                     |
+| `service`                 | `boolean`                      | `false`                 | [Whether this script is long-running, e.g. a server](#cleaning-output).                                     |
+| `packageLocks`            | `string[]`                     | `['package-lock.json']` | [Names of package lock files](#package-locks).                                                              |
 
 ### Dependency syntax
 
@@ -501,7 +773,8 @@ The following environment variables affect the behavior of Wireit:
 
 | Variable          | Description                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `WIREIT_PARALLEL` | [Maximum number of scripts to run at one time](#parallelism).<br><br>Defaults to 4×CPUs.<br><br>Must be a positive integer or `infinity`.                                                                                                                                                                                                                                                                                            |
+| `WIREIT_FAILURES` | [How to handle script failures](#failures-and-errors).<br><br>Options:<br><ul><li>[`no-new`](#failures-and-errors) (default): Allow running scripts to finish, but don't start new ones.</li><li>[`continue`](#continue): Allow running scripts to continue, and start new ones unless any of their dependencies failed.</li><li>[`kill`](#kill): Immediately kill running scripts, and don't start new ones.</li></ul>              |
+| `WIREIT_PARALLEL` | [Maximum number of scripts to run at one time](#parallelism).<br><br>Defaults to 2×logical CPU cores.<br><br>Must be a positive integer or `infinity`.                                                                                                                                                                                                                                                                               |
 | `WIREIT_CACHE`    | [Caching mode](#caching).<br><br>Defaults to `local` unless `CI` is `true`, in which case defaults to `none`.<br><br>Automatically set to `github` by the [`google/wireit@setup-github-actions-caching/v1`](#github-actions-caching) action.<br><br>Options:<ul><li>[`local`](#local-caching): Cache to local disk.</li><li>[`github`](#github-actions-caching): Cache to GitHub Actions.</li><li>`none`: Disable caching.</li></ul> |
 | `CI`              | Affects the default value of `WIREIT_CACHE`.<br><br>Automatically set to `true` by [GitHub Actions](https://docs.github.com/en/actions/learn-github-actions/environment-variables#default-environment-variables) and most other CI (continuous integration) services.<br><br>Must be exactly `true`. If unset or any other value, interpreted as `false`.                                                                            |
 
@@ -519,22 +792,30 @@ The following glob syntaxes are supported in the `files` and `output` arrays:
 
 Also note these details:
 
+- Paths should always use `/` (forward-slash) delimiters, even on Windows.
+- Paths are interpreted relative to the current package even if there is a
+  leading `/` (e.g. `/foo` is the same as `foo`).
 - Whenever a directory is matched, all recursive children of that directory are
   included.
+- `files` are allowed to reach outside of the current package using e.g.
+  `../foo`. `output` files cannot reference files outside of the current
+  package.
 - Symlinks in input `files` are followed, so that they are identified by their content.
-- Symlinks in `output` files are cached as symlinks, so that restoring from cache doesn't create unnecessary copies.
+- Symlinks in `output` files are cached as symlinks, so that restoring from
+  cache doesn't create unnecessary copies.
 - The order of `!exclude` patterns is significant.
 - Hidden/dot files are matched by `*` and `**`.
 - Patterns are case-sensitive (if supported by the filesystem).
 
-### Cache key
+### Fingerprint
 
-The following inputs determine the _cache key_ for a script. This key is used to
-determine whether a script can be skipped for [incremental
+The following inputs determine the _fingerprint_ for a script. This value is
+used to determine whether a script can be skipped for [incremental
 build](#incremental-build), and whether its output can be [restored from
 cache](#caching).
 
 - The `command` setting.
+- The [extra arguments](#extra-arguments) set on the command-line.
 - The `clean` setting.
 - The `output` glob patterns.
 - The SHA256 content hashes of all files matching `files`.
@@ -543,10 +824,11 @@ cache](#caching).
 - The system platform (e.g. `linux`, `win32`).
 - The system CPU architecture (e.g. `x64`).
 - The system Node version (e.g. `16.7.0`).
-- The cache key of all transitive dependencies.
+- The fingerprint of all transitive dependencies, unless `cascade` is set to
+  `false`.
 
 When using [GitHub Actions caching](#github-actions-caching), the following
-input also affects the cache key:
+input also affects the fingerprint:
 
 - The `ImageOS` environment variable (e.g. `ubuntu20`, `macos11`).
 
@@ -554,9 +836,16 @@ input also affects the cache key:
 
 Wireit is supported on Linux, macOS, and Windows.
 
-Wireit requires Node Active LTS (16.7.0+) or Current (18.0.0+). Node Maintenance
-LTS releases are not supported. See
-[here](https://nodejs.org/en/about/releases/) for Node's release schedule.
+Wireit is supported on Node Current (19), LTS (18), and Maintenance (16 and 14).
+See [Node releases](https://nodejs.org/en/about/releases/) for the schedule.
+
+> **Warning**
+> Wireit will no longer work with Node 14 when it reaches end-of-life on
+> 2023-04-30. We recommend upgrading to Node 18 as soon as possible.
+
+Wireit is supported on the npm versions that ship with the latest versions of
+the above supported Node versions (6 and 8), Yarn Classic (1), Yarn Berry (3),
+and pnpm (7).
 
 ## Related tools
 
@@ -582,8 +871,8 @@ Here are some things you might especially like about Wireit:
   services. Just add a single `uses:` line to your workflows.
 
 - **Watch any script**. Want to automatically re-run your build and tests
-  whenever you make a change? Type `npm test watch`. Any script you've
-  configured using Wireit can be watched by typing `watch` after it.
+  whenever you make a change? Type `npm test --watch`. Any script you've
+  configured using Wireit can be watched by typing `--watch` after it.
 
 - **Great for single packages and monorepos**. Wireit has no opinion about how
   your packages are arranged. It works great with single packages, because you

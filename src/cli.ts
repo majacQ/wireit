@@ -4,137 +4,20 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import * as os from 'os';
-import {dirname} from 'path';
-import {WireitError} from './error.js';
-import {DefaultLogger} from './logging/default-logger.js';
+import {Result} from './error.js';
 import {Analyzer} from './analyzer.js';
 import {Executor} from './executor.js';
 import {WorkerPool} from './util/worker-pool.js';
 import {unreachable} from './util/unreachable.js';
+import {Failure} from './event.js';
+import {logger, getOptions} from './cli-options.js';
 
-import type {ScriptReference} from './script.js';
-
-// The "npm_package_json" environment variable gives us the path to the
-// package.json file for the current script's npm package. The similar
-// environment variable "npm_config_local_prefix" gives us the package directory
-// (i.e. without the "/package.json"), however when a package is a member of an
-// npm workspace, then "npm_config_local_prefix" is instead that of the
-// workspace root package.
-const packageJsonPath = process.env.npm_package_json;
-const packageDir = packageJsonPath ? dirname(packageJsonPath) : undefined;
-const logger = new DefaultLogger(packageDir ?? process.cwd());
-
-interface Options {
-  script: ScriptReference;
-  watch: boolean;
-  numWorkers: number;
-  cache: 'local' | 'github' | 'none';
-}
-
-const getOptions = (): Options => {
-  // These "npm_" prefixed environment variables are set by npm. We require that
-  // wireit always be launched via an npm script, so if any are missing we
-  // assume it was run directly instead of via npm.
-  //
-  // We need to handle "npx wireit" as a special case, because it sets
-  // "npm_lifecycle_event" to "npx". The "npm_execpath" will be either
-  // "npm-cli.js" or "npx-cli.js", so we use that to detect this case.
-  if (!packageDir) {
-    const npmMajorVersion =
-      process.env.npm_config_user_agent?.match(/npm\/(\d+)/)?.[1];
-    const minimumMajorNpmVersion = 8;
-    if (
-      npmMajorVersion != null &&
-      Number(npmMajorVersion) < minimumMajorNpmVersion
-    ) {
-      throw new WireitError({
-        type: 'failure',
-        reason: 'old-npm-version',
-        minNpmVersion: `${minimumMajorNpmVersion}`,
-        script: {packageDir: process.cwd()},
-        detail: `Env variable npm_package_json was not set.`,
-      });
-    }
+const run = async (): Promise<Result<void, Failure[]>> => {
+  const optionsResult = getOptions();
+  if (!optionsResult.ok) {
+    return {ok: false, error: [optionsResult.error]};
   }
-  const name = process.env.npm_lifecycle_event;
-  const execPathCorrect = process.env.npm_execpath?.endsWith('npm-cli.js');
-  if (!packageDir || !name || !execPathCorrect) {
-    throw new WireitError({
-      type: 'failure',
-      reason: 'launched-incorrectly',
-      script: {packageDir: packageDir ?? process.cwd()},
-    });
-  }
-  const script = {packageDir, name};
-
-  const numWorkers = (() => {
-    const workerString = process.env['WIREIT_PARALLEL'] ?? '';
-    // Many scripts will be IO blocked rather than CPU blocked, so running
-    // multiple scripts per CPU will help keep things moving.
-    const defaultValue = os.cpus().length * 4;
-    if (workerString.match(/^infinity$/i)) {
-      return Infinity;
-    }
-    if (workerString == null || workerString === '') {
-      return defaultValue;
-    }
-    const parsedInt = parseInt(workerString, 10);
-    if (Number.isNaN(parsedInt) || parsedInt <= 0) {
-      throw new WireitError({
-        reason: 'invalid-usage',
-        message:
-          `Expected the WIREIT_PARALLEL env variable to be ` +
-          `a positive integer, got ${JSON.stringify(workerString)}`,
-        script,
-        type: 'failure',
-      });
-    }
-    return parsedInt;
-  })();
-
-  const cache = (() => {
-    const str = process.env['WIREIT_CACHE'];
-    if (str === undefined) {
-      // The CI variable is a convention that is automatically set by GitHub
-      // Actions [0], Travis [1], and other CI (continuous integration)
-      // providers.
-      //
-      // [0] https://docs.github.com/en/actions/learn-github-actions/environment-variables#default-environment-variables
-      // [1] https://docs.travis-ci.com/user/environment-variables/#default-environment-variables
-      //
-      // If we're on CI, we don't want "local" caching, because anything we
-      // store locally will be lost when the VM shuts down.
-      //
-      // We also don't want "github", because (even if we also detected that
-      // we're specifically on GitHub) we should be cautious about using up
-      // storage quota, and instead require opt-in via WIREIT_CACHE=github.
-      const ci = process.env['CI'] === 'true';
-      return ci ? 'none' : 'local';
-    }
-    if (str === 'local' || str === 'github' || str === 'none') {
-      return str;
-    }
-    throw new WireitError({
-      reason: 'invalid-usage',
-      message:
-        `Expected the WIREIT_CACHE env variable to be ` +
-        `"local", "github", or "none", got ${JSON.stringify(str)}`,
-      script,
-      type: 'failure',
-    });
-  })();
-
-  return {
-    script,
-    watch: process.argv[2] === 'watch',
-    numWorkers,
-    cache,
-  };
-};
-
-const run = async () => {
-  const options = getOptions();
+  const options = optionsResult.value;
 
   const workerPool = new WorkerPool(options.numWorkers);
 
@@ -147,25 +30,33 @@ const run = async () => {
       break;
     }
     case 'github': {
-      const {GitHubActionsCache, GitHubActionsCacheError} = await import(
+      const {GitHubActionsCache} = await import(
         './caching/github-actions-cache.js'
       );
-      try {
-        cache = new GitHubActionsCache(logger);
-      } catch (error) {
-        if (
-          error instanceof GitHubActionsCacheError &&
-          error.reason === 'invalid-usage'
-        ) {
-          throw new WireitError({
-            script: options.script,
-            type: 'failure',
-            reason: 'invalid-usage',
-            message: error.message,
-          });
+      const cacheResult = GitHubActionsCache.create(logger);
+      if (!cacheResult.ok) {
+        if (cacheResult.error.reason === 'invalid-usage') {
+          return {
+            ok: false,
+            error: [
+              {
+                script: options.script,
+                type: 'failure',
+                reason: 'invalid-usage',
+                message: cacheResult.error.message,
+              },
+            ],
+          };
+        } else {
+          const never: never = cacheResult.error.reason;
+          throw new Error(
+            `Internal error: unexpected cache result error reason: ${String(
+              never
+            )}`
+          );
         }
-        throw error;
       }
+      cache = cacheResult.value;
       break;
     }
     case 'none': {
@@ -179,34 +70,64 @@ const run = async () => {
     }
   }
 
-  const abort = new AbortController();
-  process.on('SIGINT', () => {
-    abort.abort();
-  });
-
   if (options.watch) {
     const {Watcher} = await import('./watcher.js');
-    await Watcher.watch(options.script, logger, workerPool, cache, abort);
+    const watcher = new Watcher(
+      options.script,
+      options.extraArgs,
+      logger,
+      workerPool,
+      cache,
+      options.failureMode
+    );
+    process.on('SIGINT', () => {
+      watcher.abort();
+    });
+    await watcher.watch();
+    return {ok: true, value: undefined};
   } else {
     const analyzer = new Analyzer();
-    const analyzed = await analyzer.analyze(options.script);
-    const executor = new Executor(logger, workerPool, cache);
-    await executor.execute(analyzed);
+    const {config} = await analyzer.analyze(options.script, options.extraArgs);
+    if (!config.ok) {
+      return config;
+    }
+    const executor = new Executor(
+      config.value,
+      logger,
+      workerPool,
+      cache,
+      options.failureMode,
+      undefined,
+      false
+    );
+    process.on('SIGINT', () => {
+      executor.abort();
+    });
+    const {persistentServices, errors} = await executor.execute();
+    if (persistentServices.size > 0) {
+      for (const service of persistentServices.values()) {
+        const result = await service.terminated;
+        if (!result.ok) {
+          errors.push(result.error);
+        }
+      }
+      if (errors.length > 0) {
+        return {
+          ok: false,
+          error: errors,
+        };
+      }
+    }
+    return errors.length === 0
+      ? {ok: true, value: undefined}
+      : {ok: false, error: errors};
   }
 };
 
-try {
-  await run();
-} catch (error) {
-  const errors = error instanceof AggregateError ? error.errors : [error];
-  for (const e of errors) {
-    if (e instanceof WireitError) {
-      logger.log(e.event);
-    } else {
-      // Only print a stack trace if we get an unexpected error.
-      console.error(`Unexpected error: ${(e as Error).toString()}}`);
-      console.error((e as Error).stack);
-    }
+const result = await run();
+if (!result.ok) {
+  for (const failure of result.error) {
+    logger.log(failure);
   }
   process.exitCode = 1;
 }

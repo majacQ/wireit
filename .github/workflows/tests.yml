@@ -5,22 +5,38 @@ on: [push, pull_request]
 jobs:
   tests:
     strategy:
+      # We support Node Current, LTS, and Maintenance. See
+      # https://nodejs.org/en/about/releases/ for release schedule.
+      #
+      # We test all supported Node versions on Linux, and the oldest and newest
+      # on macOS/Windows.
       matrix:
-        os: [ubuntu-20.04, windows-2022, macos-11]
-        # See https://nodejs.org/en/about/releases/ for latest LTS information.
-        node: [16] # Active LTS
         include:
-          # Also test latest, but just one OS should give us sufficient
-          # coverage.
-          - os: ubuntu-20.04
-            node: 18
+          - node: 14
+            os: ubuntu-22.04
+          - node: 14
+            os: macos-12
+          - node: 14
+            os: windows-2022
+          - node: 16
+            os: ubuntu-22.04
+          - node: 18
+            os: ubuntu-22.04
+          - node: 19
+            os: ubuntu-22.04
+          - node: 19
+            os: macos-12
+          - node: 19
+            os: windows-2022
 
       # Allow all matrix configurations to complete, instead of cancelling as
       # soon as one fails. Useful because we often have different kinds of
       # failures depending on the OS.
       fail-fast: false
 
-    timeout-minutes: 20
+    # Sometimes windows is far slower than the other OSs. Give it enough
+    # time to complete if it's going to.
+    timeout-minutes: 40
     runs-on: ${{ matrix.os }}
 
     env:
@@ -40,20 +56,25 @@ jobs:
 
       - run: npm ci
 
+      # Don't bother running the vscode-extension tests on Node 14, because the
+      # minimum version of VSCode we support uses Node 16.
+      - if: matrix.node == 14
+        run: npm run test:headless
+
       # See https://code.visualstudio.com/api/working-with-extensions/continuous-integration#github-actions for why we need xvfb-run
       - run: npm test
-        if: runner.os != 'Linux'
+        if: runner.os != 'Linux' && matrix.node != 14
       - run: xvfb-run -a npm test
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.node != 14
 
   lint-and-format:
     timeout-minutes: 5
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v3
       - uses: actions/setup-node@v3
         with:
-          node-version: 16
+          node-version: 18
           cache: npm
 
       - run: npm ci
